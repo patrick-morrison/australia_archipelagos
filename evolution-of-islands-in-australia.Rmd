@@ -1,0 +1,442 @@
+---
+title: "The evolution of island geographies in Australia"
+description: |
+  The combination of bathymetric data and sea level curves reveals changing island geographies through the Pleistocene and Holocene.
+author:
+  - name: Patrick Morrison
+    url: https://padmorrison.com
+    affiliation: Centre for Rock Art Research + Management, University of Western Australia
+    affiliation_url: https://www.crarm.uwa.edu.au/
+    orcid_id: 0000-0003-0920-3405
+date: 2023-02-06
+output:
+  distill::distill_article:
+    self_contained: true
+    code_folding: true
+    toc: true
+bibliography: inputs/references.bib
+draft: false
+---
+
+This notebook contains the analysis run for 'The evolution of island geographies and the emergence and persistence of Indigenous maritime cultures' (Morrison et al. 2023.)
+
+It relies on the sf, terra, and stars libraries. 
+
+```{r message=FALSE, warning=FALSE, results = 'hide'}
+library(terra)
+library(stars)
+library(tidyverse)
+library(sf)
+library(units)
+library(lwgeom)
+library(geojsonsf)
+library(leaflet)
+library(glue)
+library(readxl)
+library(patchwork)
+theme_set(theme_bw())
+
+dir.create("output_islands")
+dir.create("output_islands/spatial")
+dir.create("output_islands/intervis")
+dir.create("output_islands/area")
+dir.create("output_islands/data")
+dir.create("output_islands/pub")
+```
+
+The Geoscience Australia Australian Bathymetry and Topography Grid has elevation data for the entire Australian continent at a 250m horizontal resolution. It is available as a [1.3Gb \*.ers grid file](http://pid.geoscience.gov.au/dataset/ga/67703).
+
+The study area is defined as everything within 200km of the LGM shoreline, in an Australian Albers projection.
+
+```{r import, message=FALSE, warning=FALSE}
+#Load ausbath dataset https://doi.org/10.25919/cm17-xc81
+bath <- rast('external_data/ausbath/ausbath_09_v4_ex_ex.ers') %>%
+  #aggregate(2) %>% 
+  terra::project('epsg:3577')
+
+lake_eyre <- geojson_sf('inputs/lake_eyre.geojson') %>% st_transform(3577)
+analysis_regions <- geojson_sf('inputs/regions.geojson') %>% st_transform(3577)
+
+
+#define the study area as everything up to 200km from the lgm shorelines,
+#exclude lake eyre
+study_area <- st_as_stars(bath>-130) %>%
+  st_as_sf(merge=TRUE) %>% 
+  filter(across(1, ~ . == 1)) %>%  
+  st_cast("POLYGON") %>% st_make_valid() %>% 
+  mutate(area = as.numeric(set_units(st_area(.), ha))) %>% 
+  filter(area>10e6) %>% 
+  st_buffer(2e5) %>%
+  st_difference(lake_eyre)
+```
+
+## Sea Level Figure
+
+The sea level curve for this analysis was the Red Sea sea level record: https://doi.org/10.1038/nature11593 [@grant-2012].
+Their supplementary material includes the full data, which was resampled by 1ka.
+
+```{r fig.height=3.5, fig.width=8}
+grant2012 <- read_excel('external_data/grant2012.xls',
+                        sheet = "(4) RSL", range = "E9:J1210")[-1,]
+
+sealevel <- grant2012 %>% 
+  select(
+    age = Age...1,
+    smooth = RSL_smooth
+  ) %>% mutate_all(as.double) %>% filter(age<=125)
+
+ci <- grant2012 %>% select(
+  ci_age = Age...4,
+  upper = `RSL_95%upper`,
+  lower = `RSL_95%lower`
+) %>% mutate_all(as.double) %>% filter(ci_age<=125)
+
+years <- seq(0,
+             65,
+             by = 1) #in ka
+
+sea_spline <- with(sealevel, smooth.spline(age, smooth, all.knots=TRUE))
+
+predictions <- predict(sea_spline, years) %>% 
+  as_tibble() %>%
+  dplyr::select('age' = x, "smooth"=y) %>% 
+  mutate(smooth=replace(smooth, age==0, 0))
+
+
+ggplot() +
+    geom_ribbon(data=ci,
+                aes(x = ci_age, ymin=lower, ymax=upper),
+                fill='lightgrey') +
+    geom_line(data=sealevel, aes(age,smooth), colour="blue4", linewidth=1) + 
+    scale_x_reverse(n.breaks=12, expand = c(0, 0)) +
+    scale_y_continuous(breaks=c(20,0,-40,-80,-120), position = "right") +
+  annotate("text", x = 65, y = -20, label = "Human arrival\n in Sahul") +
+  annotate("text", x = 24, y = -20, label = "LGM") +
+    geom_vline(xintercept = c(19, 29,55,75), linetype = "dotted") +
+    labs(title="Sea level since the last interglacial", subtitle = "",
+         x='Thousands of years ago', y='Sea level below present (m)')
+
+ggsave('output_islands/pub/sea_levels.png', bg='white', width = 8, height = 3.5)
+```
+
+
+## Islands under the sea
+
+Then we defined a function that takes this bathymetry and sea level, and returns a vectorised landmass with area and intervisibility zones (following Kealy et al 2017).
+```{r message=FALSE, warning=FALSE}
+#function that takes a bathymetry and sea level, and returns the landmass
+flood <- function(bath, sea_level)   {
+  
+  land <- st_as_stars(bath > sea_level) %>%
+    st_as_sf(merge=TRUE) %>% 
+    filter(across(1, ~ . == 1)) %>%  
+    st_cast("POLYGON") %>% st_make_valid() %>% 
+    st_filter(study_area) %>% 
+    mutate(area = st_area(.),
+           area = as.numeric(round(set_units(area, ha))),
+           per = st_perimeter(.),
+           per = as.numeric(round(set_units(per, m))),
+           elev = terra::extract(x = bath, y = terra::vect(.),
+                        fun=max, na.rm=TRUE)[,2]-sea_level,
+           vis = (3.56*sqrt(0.5)) + 3.57*sqrt(elev))
+  return(land)
+}
+```
+
+Another function takes this and produces a summary of measurements for plotting, according to regions defined in the paper.
+```{r}
+region_calculations <- function(islands_measures, ri) {
+  
+  islands_measures <- filter(islands_measures, mainland_vis != 'none')
+    
+  island_gridded <- islands_measures %>% 
+    st_join(st_set_crs(analysis_regions, st_crs(islands_measures)),
+            largest=TRUE) %>% 
+    group_by(region) %>% 
+    summarise(
+      nislands = n(),
+      total_area = sum(area),
+      total_per = sum(per)
+      ) %>% 
+    st_set_geometry(NULL)
+  
+  ri <- filter(ri, mainland != 'none')
+  
+    intervis_gridded <- ri %>% 
+    st_join(st_set_crs(analysis_regions, st_crs(ri)),
+            largest=TRUE) %>% 
+    group_by(region) %>% 
+    summarise(
+      n_areas = n(),
+      total_ri_area = sum(area),
+      ) %>% 
+    st_set_geometry(NULL)
+    
+    counts <- island_gridded %>% 
+      left_join(intervis_gridded, by = 'region')
+    
+  
+  
+  return(counts)
+}
+```
+
+Island measurements are summarised using 200km wide hexagonal bins.
+```{r}
+grid_islands <- function(islands_measures) {
+    
+  island_gridded <- islands_measures %>% 
+    filter(mainland_vis != 'none') %>% 
+    st_join(st_set_crs(grid_empty, st_crs(islands_measures)),
+            largest=TRUE) %>% 
+    group_by(grid_id) %>% 
+    summarise(
+      nislands = n(),
+      total_area = sum(area),
+      total_per = sum(per)
+      ) %>% 
+    filter(nislands>0) %>%
+    st_set_geometry(NULL)
+  
+  grid <- grid_empty %>% 
+    st_set_crs(st_crs(islands_measures)) %>% 
+    right_join(island_gridded)
+  
+  return(grid)
+}
+
+#create hexagonal grid
+grid_empty <- ext(bath) %>%
+  as.polygons() %>%
+  st_as_sf() %>% 
+  st_make_grid(cellsize = 200000,
+               what = "polygons", square = FALSE) %>% 
+  st_sf() %>% 
+  mutate(grid_id = row_number())
+```
+
+This function combines those above, and produces outputs for each sea level in the publication.
+```{r}
+plots_for_pub <- function(bath, sea_level) {
+  
+  flooded_test <- flood(bath, sea_level)
+  mainland_test <- filter(flooded_test, area > 10e5)
+  islands_test <- filter(flooded_test, area < 10e5)
+  
+  ri <- st_buffer(islands_test, islands_test$vis*1000) %>%
+  st_union() %>% st_cast('POLYGON') %>% st_as_sf() %>% mutate(
+     mainland = ifelse(lengths(st_intersects(., mainland_test))>0, 'mainland', 'none'),
+     area = st_area(.),
+           area = as.numeric(round(set_units(area, ha))))
+  
+  ra <- st_buffer(islands_test, (islands_test$vis/2)*1000) %>%
+  st_union() %>% st_cast('POLYGON') %>% st_as_sf() %>% mutate(
+     mainland = ifelse(lengths(st_intersects(., mainland_test))>0, 'mainland', 'none'),
+     area = st_area(.),
+           area = as.numeric(round(set_units(area, ha))))
+  
+  islands_test <- islands_test %>% mutate(
+  mainland_vis = case_when(
+    lengths(st_intersects(.,
+                          filter(ra, mainland =='mainland'))) > 0 ~ 'ra',
+    lengths(st_intersects(.,
+                          filter(ri, mainland =='mainland'))) > 0 ~ 'ri',
+    TRUE ~ 'none' 
+  )
+  )
+  
+  dir.create(glue("output_islands/pub/{sea_level}m"))
+  st_write(ri, glue("output_islands/pub/{sea_level}m/ri_{sea_level}m.geojson"), append=FALSE)
+  st_write(ra, glue("output_islands/pub/{sea_level}m/ra_{sea_level}m.geojson"), append=FALSE)
+  st_write(islands_test, glue("output_islands/pub/{sea_level}m/islands_{sea_level}m.geojson"), append=FALSE)
+  st_write(mainland_test, glue("output_islands/pub/{sea_level}m/mainland_{sea_level}m.geojson"), append=FALSE)
+  
+  
+ggplot() +
+  geom_sf(data=filter(ri, mainland=='mainland'), linewidth = 0, fill='#bcd2ee') +
+  geom_sf(data=filter(ra, mainland=='mainland'), linewidth = 0, fill='#6e7b8b') +
+  geom_sf(data=mainland_test, linewidth = 0.1, color='#e0e0e0') +
+  geom_sf(data = islands_test, linewidth = 0.1, fill='#C4C4C4') +
+  geom_sf(data = filter(islands_test, mainland_vis!='none'), linewidth = 0.1, fill='#701C00') +
+  labs(title = paste0("Intervisibility surfaces"),
+       subtitle = paste0(round(sea_level), "m sea level, compared to present")) +
+  theme(legend.position = "bottom") +
+   coord_sf(xlim = c(-2143673, 2719484), ylim = c(-5175727, -835297), expand = FALSE)
+ggsave(glue("output_islands/pub/{sea_level}m/intervis_{sea_level}m.png"), bg='white', width = 7, height = 7)
+ggsave(glue("output_islands/pub/{sea_level}m/intervis_{sea_level}m.pdf"), bg='white', width = 7, height = 7)
+
+#grid the islands computed before
+grid <- grid_islands(islands_test)
+
+ggplot(grid) +
+  geom_sf(data=mainland_test, linewidth = 0.1, color='#e0e0e0') +
+  geom_sf(data=islands_test, linewidth = 0.1, fill='#701C00') +
+  geom_sf(aes(fill=log(total_area),
+              alpha =log(total_area)), color='transparent') +
+  scale_fill_gradient(low = "white", high = "#015488",
+                      limits=c(0,15),guide = 'none') +
+  scale_alpha(guide = 'none', range = c(0.01, 0.8)) +
+  #geom_sf_text(aes(label=nislands), colour='white') +
+  labs(title = paste0("Total island area"),
+       subtitle = paste0(round(sea_level), "m sea level, compared to present"),
+       fill='log total area (ha)') +
+   coord_sf(xlim = c(-2143673, 2719484), ylim = c(-5175727, -835297), expand = FALSE)
+  theme(legend.position = "bottom")
+  
+ggsave(glue("output_islands/pub/{sea_level}m/area_{sea_level}m.png"), bg='white', width = 7, height = 7)
+ggsave(glue("output_islands/pub/{sea_level}m/area_{sea_level}m.pdf"), bg='white', width = 7, height = 7)
+
+regions_counted <- region_calculations(islands_test, ri) %>% 
+  mutate(sea_level = sea_level)
+write_csv(regions_counted, glue("output_islands/pub/{sea_level}m/island_counts_{sea_level}m.csv"))
+
+}
+
+for(sea_level in c(0,-40,-80,-120)) {
+  plots_for_pub(bath = bath, sea_level = sea_level)
+}
+
+dir.create(glue("output_islands/pub/supporting"))
+
+data <- tribble(
+  ~vis, ~area,
+  "Island",   0,
+  "Mainland",   0,
+  "Absolute Intervisibility",   15,
+  "Relative Intervisibility",   15,
+)
+
+area_legend <- ggplot(data) +
+  geom_col(aes(vis, area, fill = area)) +
+  labs(fill = 'log(area)') +
+  theme(legend.position="bottom")
+
+ggsave("output_islands/pub/supporting/legend_area.pdf", area_legend)
+
+intervis_legend <- ggplot(data) +
+  geom_col(aes(vis, area, fill = vis)) +
+  labs(fill = 'Category') +
+  scale_fill_manual(values = c('Mainland' = '#E5E5E5', 'Island' = '#701C00', 'Absolute Intervisibility' = '#6e7b8b', 'Relative Intervisibility' = '#bcd2ee')) + 
+  theme(legend.position="bottom")
+ggsave("output_islands/pub/supporting/legend_vis.pdf", intervis_legend)
+```
+
+Similar function to above, but this one calculates it based on the year, taken from the sea level curve. Then it outputs the results for every 2,000 years.
+```{r}
+plot_intervis_year <- function(bath, step) {
+  
+  sea_level <- predictions$smooth[step]
+  age <- predictions$age[step]
+  
+  flooded_test <- flood(bath, sea_level)
+  mainland_test <- filter(flooded_test, area > 10e5)
+  islands_test <- filter(flooded_test, area < 10e5)
+  
+  ri <- st_buffer(islands_test, islands_test$vis*1000) %>%
+  st_union() %>% st_cast('POLYGON') %>% st_as_sf() %>% mutate(
+     mainland = ifelse(lengths(st_intersects(., mainland_test))>0, 'mainland', 'none'),
+     area = st_area(.),
+           area = as.numeric(round(set_units(area, ha))))
+  
+  ra <- st_buffer(islands_test, (islands_test$vis/2)*1000) %>%
+  st_union() %>% st_cast('POLYGON') %>% st_as_sf() %>% mutate(
+     mainland = ifelse(lengths(st_intersects(., mainland_test))>0, 'mainland', 'none'),
+     area = st_area(.),
+           area = as.numeric(round(set_units(area, ha))))
+  
+  islands_test <- islands_test %>% mutate(
+  mainland_vis = case_when(
+    lengths(st_intersects(.,
+                          filter(ra, mainland =='mainland'))) > 0 ~ 'ra',
+    lengths(st_intersects(.,
+                          filter(ri, mainland =='mainland'))) > 0 ~ 'ri',
+    TRUE ~ 'none' 
+  )
+  )
+  
+  dir.create(glue("output_islands/spatial/{age}ka"))
+  st_write(ri, glue("output_islands/spatial/{age}ka/ri_{age}ka.geojson"), append=FALSE)
+  st_write(ra, glue("output_islands/spatial/{age}ka/ra_{age}ka.geojson"), append=FALSE)
+  st_write(islands_test, glue("output_islands/spatial/{age}ka/islands_{age}ka.geojson"), append=FALSE)
+  st_write(mainland_test, glue("output_islands/spatial/{age}ka/mainland{age}ka.geojson"), append=FALSE)
+  
+  
+ggplot() +
+  geom_sf(data=filter(ri, mainland=='mainland'), size = 0, fill='#bcd2ee') +
+  geom_sf(data=filter(ra, mainland=='mainland'), size = 0, fill='#6e7b8b') +
+  geom_sf(data=mainland_test, linewidth = 0.1, color='#e0e0e0') +
+  geom_sf(data = islands_test, linewidth = 0.1, fill='#C4C4C4') +
+  geom_sf(data = filter(islands_test,mainland_vis!='none'), size = 0.1, fill='#701C00') +
+  labs(title = paste0("Intervisibility surfaces at ", age, "ka"),
+       subtitle = paste0(round(sea_level), "m sea level, compared to present")) +
+  theme(legend.position = "bottom") +
+   coord_sf(xlim = c(-2143673, 2889484), ylim = c(-5175727, -635297), expand = FALSE)
+ggsave(glue("output_islands/intervis/intervis_{age}ka.png"), bg='white', width = 7, height = 7)
+
+#grid the islands computed before
+grid <- grid_islands(islands_test)
+
+ggplot(grid) +
+  geom_sf(data=mainland_test, size = 0.1, color='#e0e0e0') +
+  geom_sf(data=islands_test, size = 0.1, fill='#701C00') +
+  geom_sf(aes(fill=log(total_area),
+              alpha =log(total_area)), color='transparent') +
+  scale_fill_gradient(low = "white", high = "#015488",
+                      limits=c(0,15),guide = 'none') +
+  scale_alpha(guide = 'none', range = c(0.01, 0.8)) +
+  #geom_sf_text(aes(label=nislands), colour='white') +
+  labs(title = paste0("Total island area at ", age, "ka"),
+       subtitle = paste0(round(sea_level), "m sea level, compared to present"),
+       fill='log total area (ha)') +
+   coord_sf(xlim = c(-2143673, 2889484), ylim = c(-5175727, -635297), expand = FALSE)
+  theme(legend.position = "bottom")
+  
+ggsave(glue("output_islands/area/area_{age}ka.png"), bg='white', width = 7, height = 7)
+
+
+regions_counted <- region_calculations(islands_test, ri) %>% 
+  mutate(sea_level = sea_level,
+         age = age)
+write_csv(regions_counted, glue("output_islands/data/island_counts_{age}ka.csv"))
+
+}
+
+for(step in seq(1,nrow(predictions),2)) {
+  plot_intervis_year(bath = bath, step = step)
+}
+```
+
+Finally, use the computed regional summaries to visualise a timeseries.
+```{r fig.height=6, fig.width=10}
+order <- c('Pilbara/Canarvon', 'Kimberley', 'Tiwi-Coburg', 'Gulf of Carpentaria', 
+           'Torres Strait', 'Great Barrier Reef', 'Sydney Area', 'Bass Strait',
+           'Southern Tasmania', 'Kangaroo Island Area')
+
+region_counts <- read_csv(fs::dir_ls('output_islands/data/', regexp = "\\.csv$")) %>% 
+  mutate(region = fct_relevel(region, order),
+         total_area = log(total_area/100 + 1),
+         total_ri_area = total_ri_area/100) %>% 
+  filter(region != 'NA') %>% 
+  filter((age %% 2) == 0)
+
+ggplot(region_counts) +
+  geom_line(aes(age,total_area)) +
+  geom_point(aes(age,total_area), size =.5, alpha=0.3) +
+  scale_y_log10() +
+ facet_grid(rows = vars(region), scales = "free_y") +  ylim(c(0, NA)) +
+  theme(strip.text.y.right = element_text(angle = 0)) +
+  labs(title = 'Total Island Area Available',
+       x = 'Age (ka)', y='Area log sqkm') + geom_vline(xintercept = 7) +
+ggplot(region_counts) +
+  geom_line(aes(age,total_ri_area)) +
+  geom_point(aes(age,total_ri_area), size =.5, alpha=0.3) +
+  facet_grid(rows = vars(region), scales = "free_y") +  ylim(c(0, NA)) +
+  theme(strip.text.y.right = element_text(angle = 0)) +
+  labs(title = 'Relative Intervisibility Area',
+       x = 'Age (ka)', y='Area sqkm') +
+  geom_vline(xintercept = 7)
+
+ggsave('output_islands/pub/timeseries.png', bg='white', width = 14, height = 14)
+```
+
+

@@ -1,0 +1,234 @@
+---
+title: "Archaeological dates for island occupation in Australia"
+description: |
+  Thousands of dates from archaeolgical sites around the continent reveal a complex and persistent pattern of island and coastal occupation, spanning 50,000 years.
+author:
+  - name: Patrick Morrison
+    url: https://padmorrison.com
+    affiliation: Centre for Rock Art Research + Management, University of Western Australia
+    affiliation_url: https://www.crarm.uwa.edu.au/
+    orcid_id: 0000-0003-0920-3405
+date: 2023-02-06
+output:
+  distill::distill_article:
+    self_contained: true
+    code_folding: true
+    toc: true
+bibliography: inputs/references.bib
+draft: false
+---
+
+The Australian continent (Sahul) was first peopled by maritime voyagers 65,000 years ago. They crossed the ocean intentionally from Indonesia, with upwards of a thousand of people spending many days at sea - at one point crossing over 100km [@bird-2019]. Every possible route required island-hopping, and the evidence suggests this was enabled by a broad culture of maritime competency in the islands of Wallacea [@oconnor-2011; @balme-2013].
+
+When people reached Australia, they faced a landscape very different than today. Sea levels were about 80m lower than present, forming very different coastlines and archipelagos [@brooke-2017]. Arrival via the 'southern route' would have involved crossing from the island of Timor-Roti, to a huge archipelago now submerged off the Kimberley coast (Bird et al. 2018).I
+
+In the northwest of Australia there is evidence of continuous occupation since this time [@veth-2021], with a long-standing maritime component [@veth-2017ej]. Sea levels (mostly) stabilised 8,000 years ago, beginning the current coastal configuration [@brooke-2017]. The evidence from around Australia suggests that once islands were separated from the mainland, there was mostly a hiatus of occupation, followed by a resumption of access using watercraft in the last few thousand years [@bowdler-1995]. In Murujuga (the focus of my PhD), this involved an increased maritime focus, and an incorporation of island marine resources into the economy and diet [@mcdonald-2016].
+
+Since this pattern of occupation was last reviewed, thousands of radiocarbon and luminescence dates have been collected from coastal and island archaeological sites. These are included in the AustArch [@williams-2014] and SahulArch [@codilean-2022]. databases, which can be analysed to investigate patterns of occupation. In this post, they will be considered in relation to the modern coastline and island geographies (GEODATA 2004).
+
+
+## Querying the AustArch and SahulArch databases
+
+The AustArch database was an effort to catalogue every archaeologically-relevant date determination in the Australian continent, totalling over 5,000 radiocarbon dates and several hundred dates determined using other techniques, such as luminescence [@williams-2014]. The SahulArch database a more recent effort, which includes some dates that have been published since AustArch [@codilean-2022]. It also contains some useful additional information, such as island name.
+
+This analysis starts with the SahulArch database, filtered by dates associated with occupation. It was filtered to include only 1) island sites, and 2) dates from within 50km of the modern Australian coastline, which we labelled 'coastal' sites. Additional dates from the AustArch database that are not yet in SahulArch were identified by unique lab codes. I filtered out dates that were flagged as unusable for time-series analysis.
+
+```{r setup, preview=TRUE}
+#| caption = "Coastal and island sites in the SahulArch database, plus additonal dates from the AustArch database. Plotted over a map of the Australian continent [@geodata-2004]."
+
+library(tidyverse)
+library(viridis)
+library(sf)
+library(leaflet)
+library(patchwork)
+theme_set(theme_bw())
+
+sf::sf_use_s2(FALSE)
+
+australia <- st_read('external_data/geodata_coast/cstauscd_r.shp',
+                     quiet=TRUE) %>%
+  filter(FEAT_CODE %in% c('island', 'mainland')) %>% st_transform(3577)
+mainland <- australia %>% filter(FEAT_CODE == 'mainland') %>% st_union() 
+inland <- mainland %>% st_buffer(-50000) %>% st_as_sf() %>%
+  mutate(landform = 'inland')
+study_area <- st_bbox(australia) %>% st_as_sfc() %>%  st_buffer(500000) %>%
+  st_difference(inland)
+
+#Australian Albers
+octopus <- st_read('external_data/sahularch_c14/sahularch_c14.shp',
+                   quiet=TRUE) %>%
+  st_transform(3577) %>% 
+  st_centroid() %>% 
+  filter(CONTEXT == 'Occupation', CNTRY == "AUS") %>% 
+  st_filter(study_area, .pred = st_within) %>% 
+  filter(between(C14_AGE, 0, 50000))
+
+octopus_map <- ggplot(octopus %>% arrange(C14_AGE)) +
+  geom_sf(data=australia) +
+  geom_sf(data=inland, fill = 'white', alpha = 0.4, color=alpha("grey",0.4)) +
+  geom_sf(aes(colour = C14_AGE, fill = C14_AGE), alpha=0.9, size = 1.3) +
+  coord_sf()  + labs(title = 'SahulArch database') +
+    scale_color_stepsn(
+    colours = c("#48497F", "#2D85CD", "#6B6952", "#E0662F", "#FDC003"),
+    breaks = c(0, 10000, 20000, 30000, 40000, 50000),
+    aesthetics = c('colour', "fill"), name ='Age')
+
+austarch <- read_csv("external_data/Austarch_1-3_and_IDASQ_28Nov13-1.csv")
+provided <- read_csv("inputs/additional_dates.csv")
+
+additional <- austarch %>%
+  mutate(across(c(LONGITUDE, LATITUDE, AGE,
+                  ERROR, DEPTH_FROM_SURFACE_CM),
+                as.numeric)) %>% 
+  add_row(provided) %>% 
+  filter(!(LAB_CODE %in% octopus$LABID)) %>%
+  mutate(`Data pertinent for time-series analysis or calibration` =
+           replace_na(`Data pertinent for time-series analysis or calibration`
+                      , 'NA')) %>% 
+  filter(`Data pertinent for time-series analysis or calibration` != 'Unusable') %>% 
+  drop_na(LONGITUDE, LATITUDE, AGE) %>% 
+  filter(between(AGE, 0, 50000)) %>% 
+  st_as_sf(coords = c('LONGITUDE', 'LATITUDE'), crs = 4283) %>%
+  st_transform(3577) %>% 
+  st_filter(study_area, .pred = st_within)
+
+#write_csv(additional, 'inputs/islands_austarch.csv')
+#clean this manually
+
+austarch_map <- ggplot(additional %>% arrange(AGE)) +
+  geom_sf(data=australia) +
+  geom_sf(data=inland, fill = 'white', alpha = 0.4, color=alpha("grey",0.4)) +
+  geom_sf(aes(colour = AGE, fill = AGE), alpha=0.9, size = 1.3) +
+  coord_sf() + labs(title = 'Additional dates from AustArch') +
+    scale_color_stepsn(
+    colours = c("#48497F", "#2D85CD", "#6B6952", "#E0662F", "#FDC003"),
+    breaks = c(0, 10000, 20000, 30000, 40000, 50000),
+    aesthetics = c('colour', "fill"), name ='Age', guide = "none")
+
+octopus_map + austarch_map +
+  plot_layout(guides = 'collect')
+ggsave('output_dates/dates_database.png', height = 3, width = 7, bg='white')
+```
+
+## Mapping island dates across the continent
+
+Some named islands were not offshore, but instead islands in the middle of rivers, so these were relabelled as coastal. AustArch does not have island names, and some of the regions were not aligned with the current [IBRA7](https://www.awe.gov.au/agriculture-land/land/nrs/science/ibra) specification, so these were manually edited.
+
+In total, this resulted in 3406 dates for analysis. The map below shows the 415 dates from offshore islands. There are many dates from the north and east of the continent, but the south west of Australia is understudied, despite the presence of many islands and archipelagos. I've also included the related the IBRA regions, which will help with interpreting the graph of dates below.
+
+```{r mapping}
+dates <-  octopus %>% 
+  add_row(
+  transmute(
+    left_join(additional, read_csv('inputs/islands_austarch.csv')),
+         C14_AGE = AGE,
+         IBRAREGION = IBRA_REGION,
+    ISL_NAME = ISL_NAME,
+    METANAME = SITE,
+    C14_ERRPOS = as.numeric(ERROR),
+    C14_ERRNEG = as.numeric(ERROR),
+    geometry=geometry)
+  ) %>% 
+  mutate(
+    ISL_NAME = na_if(ISL_NAME, 'NA'),
+    ISL_NAME = replace_na(ISL_NAME, 'Coastal'),
+    IBRAREGION = case_when(
+      ISL_NAME == "Campbell Island" ~ "Carnarvon",
+      ISL_NAME == "Great Glennie Island" ~ "Furneaux",
+      IBRAREGION == "Southern East Queensland" ~ "South Eastern Queensland",
+      IBRAREGION == "Victoria Volcanic Plain" ~ "Southern Volcanic Plain",
+      IBRAREGION == "Brigalow Belt North (coastal)" ~ "Brigalow Belt North",
+      IBRAREGION == "Pilbara (coast)" ~ "Pilbara",
+      TRUE ~ IBRAREGION
+    ),
+      ISL_NAME = case_when(
+      ISL_NAME == "Lindsay Island" ~ "Coastal",
+      ISL_NAME == "Berry Island" ~ "Coastal",
+      ISL_NAME == "Goodwood Island" ~ "Coastal",
+      METANAME == "Murujuga Rockshelter" ~ "Dampier Island",
+      METANAME == "Cape du Couedic" ~ "Kangaroo Island",
+      METANAME == "Pistol Range (P2772) midden (Burrup)" ~ "Dampier Island",
+      METANAME == "Burrup Peninsula P2314" ~ "Dampier Island",
+      METANAME == "Burrup Peninsula middens and rockshelter" ~ "Dampier Island",
+      TRUE ~ ISL_NAME
+    )
+    )
+#this is an island in the middle of a river - not really of interest
+
+regions <- dates %>%
+  filter(ISL_NAME != 'Coastal') %>%
+  pull(IBRAREGION) %>%
+  unique()
+
+ibra <- st_read('external_data/IBRA7_regions/ibra7_regions.shp',
+                quiet = TRUE) %>%
+  filter(REG_NAME_7 %in% regions) %>% 
+  st_simplify(preserveTopology = TRUE, dTolerance = .01) %>% 
+  st_as_sf() %>% st_transform(4326) 
+
+
+island_dates <- dates %>% filter(ISL_NAME != 'Coastal')
+
+
+island_dates %>% 
+  st_transform(4326) %>% 
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Voyager,
+                   options = providerTileOptions(
+                     minZoom = 2, maxZoom = 7)) %>%
+  addPolygons(data = ibra, label =~REG_NAME_7, color = '#2D85CD',
+              opacity = 0.2, fillOpacity = 0.1, weight = 1) %>% 
+  addCircleMarkers(color = '#48497F',
+    clusterOptions = markerClusterOptions(
+    maxClusterRadius = 30),
+    label = ~ISL_NAME)
+```
+
+## Seeking patterns over time
+
+I am exploring the details of this pattern elsewhere, but it is obvious that the model of post-separation hiatus followed by Late Holocene reoccupation is broadly supported[@bowdler-1995]. Here the dates are presented by IBRA region, arranged clockwise around the continent. A vertical line is plotted for 7,000 years ago, which broadly coincides with modern sea levels (but this is subject to regional variation).
+
+Some patterns to see are:
+
+-   the late occupation of islands in the Gulf of Carpentaria[@clarke-1994], the Great Barrier Reef [@Lambrides-2020; @Rowland-2015; @McNiven-2014], and off the New South Wales coast [@sullivan-1982],
+
+-   the hiatus of occupation of Vanderlin Island in the Gulf Coastal region [@Sim-2016],
+
+-   the continuous but sporadic occupation of the Kimberley Island [@oconnor-1999],
+
+-   the abandonment of the Bass Strait [@Bowdler-2015], Kangaroo Island [@Draper-2015], and Barrow Island [@veth-2017ej].
+
+```{r time series, fig.height=12, fig.width=7}
+order <- c("Carnarvon", "Pilbara", "Northern Kimberley", "Tiwi Cobourg",
+           "Arnhem Coast", "Gulf Coastal","Gulf Plains",
+           "Cape York Peninsula",  "Wet Tropics", "Brigalow Belt North",
+           "Central Mackay Coast", "South Eastern Queensland",
+           "NSW North Coast", "Sydney Basin",
+           "South East Corner", "South East Coastal Plain", "Southern Volcanic Plain", 
+           "Furneaux", "Tasmanian South East", "Tasmanian West", "King",
+           "Flinders", "Kanmantoo",
+           "Swan Coastal Plain")
+
+dates %>% 
+  filter(IBRAREGION %in% regions) %>% 
+  arrange(ISL_NAME) %>% 
+    mutate(
+    ISL_NAME = fct_rev(fct_relevel(ISL_NAME, sort)),
+    ISL_NAME = fct_relevel(ISL_NAME, "Coastal"),
+    IBRAREGION = fct_relevel(IBRAREGION, order)) %>% 
+ggplot() +
+  geom_point(aes(y= ISL_NAME, x = C14_AGE,
+                 colour = ISL_NAME == 'Coastal'), alpha = 0.6) +
+  geom_segment(aes(y= ISL_NAME, yend=ISL_NAME,
+                   x = C14_AGE + C14_ERRPOS, xend = C14_AGE - C14_ERRNEG),
+               alpha = 0.2) +
+  facet_grid(rows = vars(IBRAREGION), scales="free_y", space = "free_y") +
+  geom_vline(xintercept = 8000) + 
+  scale_colour_manual(values = c('TRUE' = 'grey', 'FALSE' = '#48497F'),
+                      guide='none') + 
+  theme(strip.text.y.right = element_text(angle = 0)) + 
+  labs(title = 'Dated evidence for island and coastal occupation in Australia',
+       x= 'C14 Age', y = 'Island name and IBRA region') +
+    scale_x_continuous(limits=c(0, 50000), expand = c(0, 0), name = 'Age')
+ggsave('output_dates/dates_timeseries.png', height = 12, width = 8.3, bg='white')
+```
