@@ -407,7 +407,7 @@ for(step in seq(1,nrow(predictions),2)) {
 ```
 
 Finally, use the computed regional summaries to visualise a timeseries.
-```{r fig.height=6, fig.width=10}
+```{r fig.height=7, fig.width=7}
 order <- c('Pilbara/Canarvon', 'Kimberley', 'Tiwi-Coburg', 'Gulf of Carpentaria', 
            'Torres Strait', 'Great Barrier Reef', 'Sydney Area', 'Bass Strait',
            'Southern Tasmania', 'Kangaroo Island Area')
@@ -436,7 +436,7 @@ ggplot(region_counts) +
        x = 'Age (ka)', y='Area sqkm') +
   geom_vline(xintercept = 7)
 
-ggsave('output_islands/pub/timeseries.png', bg='white', width = 14, height = 14)
+ggsave('output_islands/pub/timeseries.png', bg='white', width = 10, height = 10)
 ```
 
 

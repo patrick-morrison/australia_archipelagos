@@ -134,6 +134,7 @@ dates <-  octopus %>%
     ISL_NAME = replace_na(ISL_NAME, 'Coastal'),
     IBRAREGION = case_when(
       ISL_NAME == "Campbell Island" ~ "Carnarvon",
+      ISL_NAME == "Prime Seal Island" ~ "Furneaux",
       ISL_NAME == "Great Glennie Island" ~ "Furneaux",
       IBRAREGION == "Southern East Queensland" ~ "South Eastern Queensland",
       IBRAREGION == "Victoria Volcanic Plain" ~ "Southern Volcanic Plain",
@@ -198,7 +199,7 @@ Some patterns to see are:
 
 -   the abandonment of the Bass Strait [@Bowdler-2015], Kangaroo Island [@Draper-2015], and Barrow Island [@veth-2017ej].
 
-```{r time series, fig.height=12, fig.width=7}
+```{r time series, fig.height=13, fig.width=7}
 order <- c("Carnarvon", "Pilbara", "Northern Kimberley", "Tiwi Cobourg",
            "Arnhem Coast", "Gulf Coastal","Gulf Plains",
            "Cape York Peninsula",  "Wet Tropics", "Brigalow Belt North",
@@ -230,5 +231,5 @@ ggplot() +
   labs(title = 'Dated evidence for island and coastal occupation in Australia',
        x= 'C14 Age', y = 'Island name and IBRA region') +
     scale_x_continuous(limits=c(0, 50000), expand = c(0, 0), name = 'Age')
-ggsave('output_dates/dates_timeseries.png', height = 12, width = 8.3, bg='white')
+ggsave('output_dates/dates_timeseries.png', height = 13.3, width = 8.3, bg='white')
 ```
